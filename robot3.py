@@ -1,0 +1,514 @@
+import numpy as np
+from copy import deepcopy
+
+dir_sensors = {'u': ['l', 'u', 'r'], 'r': ['u', 'r', 'd'],
+               'd': ['r', 'd', 'l'], 'l': ['d', 'l', 'u'],
+               'up': ['l', 'u', 'r'], 'right': ['u', 'r', 'd'],
+               'down': ['r', 'd', 'l'], 'left': ['d', 'l', 'u']}
+dir_move = {'u': [0, 1], 'r': [1, 0], 'd': [0, -1], 'l': [-1, 0],
+            'up': [0, 1], 'right': [1, 0], 'down': [0, -1], 'left': [-1, 0]}
+dir_reverse = {'u': 'd', 'r': 'l', 'd': 'u', 'l': 'r',
+               'up': 'd', 'right': 'l', 'down': 'u', 'left': 'r'}
+dir_compare ={'uu':'u','ur':'r','ru':'l','ud':'b',
+              'll':'u','lu':'r','ul':'l','du':'b',
+              'rr':'u','dl':'r','ld':'l','lr':'b',
+              'dd':'u','rd':'r','dr':'l','rl':'b',}
+dir_value={'u':1,'r':2,'d':4,'l':8}
+dir_heading={(0,1):'u',(1,0):'r',(0,-1):'d',(-1,0):'l'}
+dir_rotation={'l':-90,'u':0,'r':90}
+
+
+class Robot3(object):
+    def __init__(self, maze_dim):
+        '''
+        Use the initialization function to set up attributes that your robot
+        will use to learn and navigate the maze. Some initial attributes are
+        provided based on common information, including the size of the maze
+        the robot is placed in.
+        '''
+        self.location = [0, 0]
+        self.heading = 'u'
+        self.maze_dim = maze_dim
+        self.orientation=[0,1]        
+        self.goal_bounds=[self.maze_dim/2 - 1,self.maze_dim/2]
+        self.skip_signal=False
+        self.movement=0
+        self.rotation=0
+        self.junctions=[]
+        self.cell_points=np.zeros([maze_dim,maze_dim],dtype='uint8')
+        self.cell_points[0,0]=1
+        self.steering=None
+        self.i=-1 #used for second running's step counting
+        self.is_to_start=False
+    def next_move(self, sensors):
+        '''
+        Use this function to determine the next move the robot should make,
+        based on the input from the sensors after its previous move. Sensor
+        inputs are a list of three distances from the robot's left, front, and
+        right-facing sensors, in that order.
+
+        Outputs should be a tuple of two values. The first value indicates
+        robot rotation (if any), as a number: 0 for no rotation, +90 for a
+        90-degree rotation clockwise, and -90 for a 90-degree rotation
+        counterclockwise. Other values will result in no rotation. The second
+        value indicates robot movement, and the robot will attempt to move the
+        number of indicated squares: a positive number indicates forwards
+        movement, while a negative number indicates backwards movement. The
+        robot may move a maximum of three units per turn. Any excess movement
+        is ignored.
+
+        If the robot wants to end a run (e.g. during the first training run in
+        the maze) then returing the tuple ('Reset', 'Reset') will indicate to
+        the tester to end the run and return the robot to the start.
+        '''
+        
+        if self.steering !=None:
+            self.i=self.i+1
+            if self.i<len(self.steering):
+                self.rotation,self.movement=self.steering[self.i][0],self.steering[self.i][1]
+                self.move(self.rotation,self.movement)
+                return self.rotation,self.movement
+            else:
+                self.steering=None
+                self.i=-1
+        stop=((self.location==[0,0] and self.heading=='d' and self.is_to_start) or
+            (manhattan_dist_to_goal(self.location,self.goal_bounds)==0 and not self.is_to_start))
+        if stop:
+            rotation='Reset'
+            movement='Reset'
+            self.location = [0, 0]
+            self.heading = 'u'
+            path=repeat_a_star(self.cell_points,10)
+            self.steering=to_steering(path)
+            return rotation, movement
+        if self.skip_signal:
+            self.movement=1
+            self.rotation=90
+            self.skip_signal=False
+        else:
+            passable=list(map(lambda x:x>0 ,sensors))
+            passable_num=passable.count(True)
+            #TODO:calculate the cell value,from 0 to 15
+            if self.cell_points[self.location[0],self.location[1]]==0:
+                self.cell_points[self.location[0],self.location[1]]=self.to_point_value(self.heading,passable)
+            if passable_num==0:
+                for i in self.junctions[::-1]:
+                    if not i.all_visited:
+                        goal=i.location
+                        break
+                else:
+                    goal=[0,0]
+                path=find_back_path(self.cell_points,self.location,goal)
+                self.steering=to_steering(path,self.heading)
+                self.i=0
+                self.rotation,self.movement=self.steering[self.i][0],self.steering[self.i][1]
+            elif passable_num==1:
+                if passable[0]==True:
+                    self.turn_left()
+                elif passable[1]==True:
+                    self.go_forward()
+                elif passable[2]==True:
+                    self.turn_right()
+            elif passable_num==2:
+                need_create=True
+                operation=''
+                for junction in self.junctions:
+                    if junction.location==self.location:
+                        operation=junction.direct(self,dir_reverse[self.heading])
+                        need_create=False
+                        break
+                if need_create:
+                    temp_junction=Junction_3(self,passable)
+                    operation=dir_compare[self.heading+temp_junction.first_branch]
+                    self.junctions.append(temp_junction)
+                if operation=='l':
+                    self.turn_left()
+                elif operation=='u':
+                    self.go_forward()
+                elif operation=='r':
+                    self.turn_right()
+                elif operation=='b':
+                    self.turn_back()
+            elif passable_num==3:
+                need_create=True
+                for junction in self.junctions:
+                    if junction.location==self.location:
+                        operation=junction.direct(self,dir_reverse[self.heading])
+                        need_create=False
+                if need_create:
+                    temp_junction=Junction_4(self)
+                    operation=dir_compare[self.heading+temp_junction.first_branch]
+                    self.junctions.append(temp_junction)
+                if operation=='l':
+                    self.turn_left()
+                elif operation=='u':
+                    self.go_forward()
+                elif operation=='r':
+                    self.turn_right()
+                elif operation=='b':
+                    self.turn_back()
+            #TODO:calculate the cell value,from 0 to 15
+            if self.cell_points[self.location[0],self.location[1]]==0:
+                self.cell_points[self.location[0],self.location[1]]=self.to_point_value(self.heading,passable)
+        self.move(self.rotation,self.movement)
+        return self.rotation, self.movement
+        
+        #process movement
+    def move(self,rotation,movement):
+        temp=self.orientation[:]
+        if rotation==-90:
+            self.orientation[0]=-temp[1]
+            self.orientation[1]=temp[0]
+            self.heading=dir_sensors[self.heading][0]
+        elif rotation==90:
+            self.orientation[0]=temp[1]
+            self.orientation[1]=-temp[0]
+            self.heading=dir_sensors[self.heading][2]
+
+        self.location[0]=self.location[0]+movement*self.orientation[0]
+        self.location[1]=self.location[1]+movement*self.orientation[1]
+    
+    def turn_back(self):
+        self.skip_signal=True
+        self.movement=0
+        self.rotation=90
+    def turn_left(self):
+        self.movement=1
+        self.rotation=-90
+    def turn_right(self):
+        self.movement=1
+        self.rotation=90
+    def go_forward(self):
+        self.movement=1
+        self.rotation=0
+    def to_point_value(self,heading,passable):
+        orientations=dir_sensors[heading][:]
+        orientations.append(dir_reverse[heading])
+        temp=[]
+        for i in orientations:
+            temp=temp+[dir_value[i]]
+        passable_list=passable
+        passable_list.append(True)
+        value=sum(list(map(lambda x:x[0]*x[1],zip(temp,passable_list))))
+        return value
+    
+    
+class Junction_3:
+    def __init__(self,Robot,passable):
+        self.location=Robot.location[:]
+        self.come_from=dir_reverse[Robot.heading]
+        orientations=dir_sensors[Robot.heading][:]
+        for i in range(len(orientations)):
+            if passable[i]==False:
+                orientations.pop(i)
+        best_path=point_to_goal(self.location,Robot.goal_bounds,orientations)
+        best_path_index=orientations.index(best_path)
+        self.first_branch=best_path
+        orientations.pop(best_path_index)
+        self.second_branch=orientations[0]
+        self.second_branch_visited=False
+        self.all_visited=False
+    def direct(self,Robot,oncoming):
+        operation=''
+        if oncoming==self.first_branch:
+            if self.second_branch_visited:
+                operation=dir_compare[dir_reverse[oncoming]+self.come_from]
+            else:
+                operation=dir_compare[dir_reverse[oncoming]+self.second_branch]
+                self.second_branch_visited=True
+        elif oncoming==self.second_branch:
+            if self.second_branch_visited:
+                operation=dir_compare[dir_reverse[oncoming]+self.come_from]
+            else:
+                self.second_branch_visited=True
+                self.all_visited=True
+                for i in Robot.junctions[::-1]:
+                    if not i.all_visited:
+                        goal=i.location
+                        break
+                else:
+                    goal=[0,0]
+                path=find_back_path(Robot.cell_points,Robot.location,goal)
+                Robot.steering=to_steering(path,Robot.heading)
+                Robot.i=0
+                Robot.rotation,Robot.movement=Robot.steering[Robot.i][0],Robot.steering[Robot.i][1]
+                return
+        elif oncoming==self.come_from:
+#            if self.second_branch_visited:
+#                operation='b'
+#            else:
+            operation=dir_compare[dir_reverse[oncoming]+self.second_branch]
+            self.second_branch_visited=True
+        if self.second_branch_visited:
+            self.all_visited=True
+        return operation
+        #crossing class
+class Junction_4:
+    def __init__(self,Robot):
+        self.location=Robot.location[:]
+        self.come_from=dir_reverse[Robot.heading]
+        orientations=dir_sensors[Robot.heading][:]
+        best_path=point_to_goal(self.location,Robot.goal_bounds,orientations)
+        best_path_index=orientations.index(best_path)
+        self.first_branch=best_path
+        orientations.pop(best_path_index)
+        best_path=point_to_goal(self.location,Robot.goal_bounds,orientations)
+        best_path_index=orientations.index(best_path)
+        self.second_branch=best_path
+        orientations.pop(best_path_index)
+        self.third_branch=orientations[0]
+        self.second_branch_visited=False
+        self.third_branch_visited=False
+        self.all_visited=False
+        self.mode=None
+    def direct(self,Robot,oncoming):
+        operation=''
+        if oncoming==self.first_branch:
+            if self.mode==None:
+                self.mode=1
+                operation=dir_compare[dir_reverse[oncoming]+self.second_branch]
+                self.second_branch_visited=True                
+            elif self.mode==2:
+                operation=dir_compare[dir_reverse[oncoming]+self.come_from]                
+        elif oncoming==self.second_branch:
+            if self.mode==None:
+                self.mode=2
+                operation=dir_compare[dir_reverse[oncoming]+self.third_branch]
+                self.second_branch_visited=True
+                self.third_branch_visited=True
+            elif self.mode==1:
+                if self.third_branch_visited:
+                    operation=dir_compare[dir_reverse[oncoming]+self.come_from]
+                else:
+                    operation=dir_compare[dir_reverse[oncoming]+self.third_branch]
+                    self.third_branch_visited=True
+            elif self.mode==2:
+                operation=dir_compare[dir_reverse[oncoming]+self.third_branch]           
+        elif oncoming==self.third_branch:
+            if self.mode==None:
+                self.mode=2
+                operation=dir_compare[dir_reverse[oncoming]+self.second_branch] 
+                self.second_branch_visited=True
+                self.third_branch_visited=True                
+            elif self.mode==1:
+                if not self.third_branch_visited:
+                    self.third_branch_visited=True
+                    self.all_visited=True
+                    for i in Robot.junctions[::-1]:
+                        if not i.all_visited:
+                            goal=i.location
+                            break
+                    else:
+                        goal=[0,0]
+                    path=find_back_path(Robot.cell_points,Robot.location,goal)
+                    Robot.steering=to_steering(path,Robot.heading)
+                    Robot.i=0
+                    Robot.rotation,Robot.movement=Robot.steering[Robot.i][0],Robot.steering[Robot.i][1]
+                    return
+            elif self.mode==2:
+                operation=dir_compare[dir_reverse[oncoming]+self.second_branch]             
+        elif oncoming==self.come_from:
+            if not self.second_branch_visited:
+                operation=dir_compare[dir_reverse[oncoming]+self.second_branch] 
+            elif not self.third_branch_visited:
+                operation=dir_compare[dir_reverse[oncoming]+self.third_branch] 
+        if self.second_branch_visited and self.third_branch_visited:
+            self.all_visited=True
+        return operation
+#use the branches location and goal bounds data to point a better branch.
+def point_to_goal(location,goal_bounds,branch_orientations):
+    x,y=0,0
+    if location[0]<=goal_bounds[0]:
+        x=goal_bounds[0]-location[0]
+    else:
+        x=goal_bounds[1]-location[0]
+    if location[1]<=goal_bounds[0]:
+        y=goal_bounds[0]-location[1]
+    else:
+        y=goal_bounds[1]-location[1]
+    best=max(branch_orientations,key=lambda o:dir_move[o][0]*x+dir_move[o][1]*y)
+    return best
+def find_back_path(maze_data,start,goal):
+    start_location=start
+    open_set = set()
+    closed_set = set()
+    start_point = Point2(start_location,maze_data[tuple(start_location)],goal)
+    start_point.g_score = 0
+    open_set.add(start_point)
+    while len(open_set) > 0:
+        current = min(open_set,key=lambda o:o.g_score + o.h_score)
+        if current.location==goal:
+            path = []
+            while current.came_from:
+                path.append(current)
+                current = current.came_from 
+            # the start node does not have a parent
+            path.append(current)
+            return path[::-1]
+
+        open_set.remove(current)
+        closed_set.add(current)
+        for neighbor in current.neighbors: #here neighbor is position data,not Point object
+            if neighbor in list(map(lambda x:x.location,closed_set)):
+                continue
+            #here is keypoint 
+            if straight_step_num(current)<2 and is_straight(current,neighbor):
+                tentative_g_score=current.g_score
+            else:
+                tentative_g_score=current.g_score+1
+            #unexplored position seem as not passable
+            if neighbor not in list(map(lambda x:x.location,open_set)):# and maze_data[tuple(neighbor)]>0:
+                neighbor_point=Point2(neighbor,maze_data[tuple(neighbor)],goal)
+                open_set.add(neighbor_point)
+            else:
+                neighbor_point=filter(lambda x:x.location==neighbor,open_set)[0]
+                if tentative_g_score>neighbor_point.g_score:
+                    continue
+            neighbor_point.came_from=current
+            neighbor_point.g_score=tentative_g_score
+class Point2:
+    def __init__(self,location,cell_data,goal):      
+        self.location = location[:]
+        self.came_from = None
+        self.g_score = 1000
+        self.h_score =sum(map(lambda x:abs(x[0]-x[1]), zip(self.location,goal)))
+        #check each orientation is passable or not
+        self.up_passable=(cell_data&1!=0)
+        self.right_passable=(cell_data&2!=0)
+        self.down_passable=(cell_data&4!=0)
+        self.left_passable=(cell_data&8!=0)
+        #append the neighbor position to the neighbors list
+        self.neighbors=[]
+        if self.up_passable:
+            self.neighbors.append([self.location[0],self.location[1]+1])
+        if self.right_passable:
+            self.neighbors.append([self.location[0]+1,self.location[1]])
+        if self.down_passable:
+            self.neighbors.append([self.location[0],self.location[1]-1])
+        if self.left_passable:
+            self.neighbors.append([self.location[0]-1,self.location[1]])
+#used for A* alghorithm
+class Point:
+    def __init__(self,location,cell_data,goal_bounds):
+        self.location = location[:]
+        self.came_from = None
+        self.g_score = 1000
+        self.h_score = manhattan_dist_to_goal(self.location,goal_bounds) 
+        #check each orientation is passable or not
+        self.up_passable=(cell_data&1!=0)
+        self.right_passable=(cell_data&2!=0)
+        self.down_passable=(cell_data&4!=0)
+        self.left_passable=(cell_data&8!=0)
+        #append the neighbor position to the neighbors list
+        self.neighbors=[]
+        if self.up_passable:
+            self.neighbors.append([self.location[0],self.location[1]+1])
+        if self.right_passable:
+            self.neighbors.append([self.location[0]+1,self.location[1]])
+        if self.down_passable:
+            self.neighbors.append([self.location[0],self.location[1]-1])
+        if self.left_passable:
+            self.neighbors.append([self.location[0]-1,self.location[1]])
+#repeat A* for several times to find a quickest path.               
+def repeat_a_star(maze_data,times):
+    path=a_star(maze_data)
+    for i in range(times-1):
+        temp=a_star(maze_data)
+        if temp[-1].g_score<path[-1].g_score:
+            path=deepcopy(temp)
+    return path
+
+def a_star(maze_data):
+    dim=maze_data.shape[0]
+    goal_bounds = [dim/2 - 1, dim/2]
+    start_location=[0,0]
+    open_set = set()
+    closed_set = set()
+    start_point = Point(start_location,maze_data[tuple(start_location)],goal_bounds)
+    start_point.g_score = 0
+    open_set.add(start_point)
+    while len(open_set) > 0:
+        current = min(open_set,key=lambda o:o.g_score + o.h_score)
+        if manhattan_dist_to_goal(current.location,goal_bounds)==0:
+            path = []
+            while current.came_from:
+                path.append(current)
+                current = current.came_from 
+            # the start node does not have a parent
+            path.append(current)
+            return path[::-1]
+
+        open_set.remove(current)
+        closed_set.add(current)
+        for neighbor in current.neighbors: #here neighbor is position data,not Point object
+            if neighbor in list(map(lambda x:x.location,closed_set)):
+                continue
+            #here is keypoint 
+            if straight_step_num(current)<2 and is_straight(current,neighbor):
+                tentative_g_score=current.g_score
+            else:
+                tentative_g_score=current.g_score+1
+            #unexplored position seem as not passable
+            if neighbor not in list(map(lambda x:x.location,open_set)):# and maze_data[tuple(neighbor)]>0:
+                neighbor_point=Point(neighbor,maze_data[tuple(neighbor)],goal_bounds)
+                open_set.add(neighbor_point)
+            else:
+                neighbor_point=filter(lambda x:x.location==neighbor,open_set)[0]
+                if tentative_g_score>neighbor_point.g_score:
+                    continue
+            neighbor_point.came_from=current
+            neighbor_point.g_score=tentative_g_score
+            
+
+#calculate distance between location and goal aera.here goal_bounds is limit of x,y           
+def manhattan_dist_to_goal(location,goal_bounds):
+    x=y=0
+    if location[0]<=goal_bounds[0]:
+        x=goal_bounds[0]-location[0]
+    else:
+        x=location[0]-goal_bounds[1]
+    if location[1]<=goal_bounds[0]:
+        y=goal_bounds[0]-location[1]
+    else:
+        y=location[1]-goal_bounds[1]
+    return x+y
+
+#calculte how many more straight steps has been taken since counting start.
+def straight_step_num(point):
+    i=0
+    temp=point
+    while(temp.came_from!=None and temp.g_score==temp.came_from.g_score):
+        i=i+1
+        temp=temp.came_from
+    return i
+#check whether s step is going straightly
+def is_straight(point,neighbor):
+    if (point.came_from!=None 
+        and neighbor[0]-point.location[0]==point.location[0]-point.came_from.location[0]
+        and neighbor[1]-point.location[1]==point.location[1]-point.came_from.location[1]):
+        return True
+    else:
+        return False
+#translate path to steering sequent.
+def to_steering(path,heading='u'):
+    steering=[]
+    temp=path[0]
+    temp.heading=heading
+    rotation=0
+    movement=0
+    for point in path[1:]:
+        point.heading = dir_heading[tuple(map(lambda x:x[0]-x[1],zip(point.location,temp.location)))]
+        if point.g_score>temp.g_score:
+            steering.append([rotation,movement])
+            turning=dir_compare[temp.heading+point.heading]
+            if turning=='b':
+                steering.append([90,0])
+                turning='r'
+            rotation=dir_rotation[turning]
+            movement=1
+        else:
+            movement+=1
+        temp=point
+    steering.append([rotation,movement])
+    return steering[1:]            
+
